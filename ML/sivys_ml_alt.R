@@ -1,0 +1,313 @@
+library(httr)
+library(ows4R)
+library(svDialogs)
+library(tidyverse)
+library(sp)
+library(nngeo)
+library(lwgeom)
+library(writexl)
+library(utilidades3F)
+library(dplyr)
+library(sf)
+
+#Limpieza del Entorno de Trabajo
+rm(list=ls())
+
+options(scipen = 100)
+
+wd <- dirname(rstudioapi::getSourceEditorContext()$path)
+
+setwd(wd)
+
+RIPTE <- read.csv("https://infra.datos.gob.ar/catalog/sspm/dataset/158/distribution/158.1/download/remuneracion-imponible-promedio-trabajadores-estables-ripte-total-pais-pesos-serie-mensual.csv")
+
+#Se asignan zonas por localidad
+zonas_sivys <- sf::read_sf("insumo/zonas.geojson") %>% 
+  mutate( zona_venta = case_when(
+    nombre == "11 de Septiembre" ~ "Norte",
+    nombre == "Churruca" ~ "Norte",
+    nombre == "El Libertador" ~ "Norte",
+    nombre == "Loma Hermosa" ~ "Norte",
+    nombre == "Remedios de Escalada de San Mart�n" ~ "Norte",
+    nombre == "Pablo Podestá" ~ "Norte",
+    TRUE ~ nombre
+    ),
+    zona_alq = case_when(
+      nombre == "11 de Septiembre" ~ "Norte",
+      nombre == "Churruca" ~ "Norte",
+      nombre == "El Libertador" ~ "Norte",
+      nombre == "Loma Hermosa" ~ "Norte",
+      nombre == "Remedios de Escalada de San Mart�n" ~ "Norte",
+      nombre == "Pablo Podestá" ~ "Norte",
+      nombre == "Ciudadela" ~ "Sur",
+      nombre == "José Ingenieros" ~ "Sur",
+      nombre == "Villa Raffo" ~ "Sur",
+      nombre == "Ciudad Jardín Lomas del Palomar" ~ "Centro",
+      nombre == "Martín Coronado" ~ "Centro",
+      nombre == "Altos de Podestá" ~ "Centro",
+      nombre == "Villa Bosch" ~ "Centro",
+      nombre == "Sáenz Peña" ~ "Este",
+      nombre == "Santos Lugares" ~ "Este",
+      TRUE ~ nombre
+    )
+    )
+
+
+# Crear un archivo ejemplo <- read_csv("insumo/11-12-23.ml.csv")
+generar_nombre_archivo <- function(){ #nueva funcion
+anio <- dlg_input(message="Ingresar año en formato AAAA")$res
+mes <- dlg_input(message="Ingresar mes formato MM")$res
+file_nom <- paste0("insumo/",anio,"_",mes,"_ml.xlsx")
+return (file_nom)
+}
+
+# Leer el archivo Excel y añadir la columna 'mes_completo'
+archivo <- readxl::read_xlsx(file_nom) %>% 
+  mutate(mes = paste(anio,mes, sep= '-'))
+
+# Formatea el mes del archivo cot_dolar 
+cot_dolar <- readxl::read_xlsx(paste0("insumo/","cot_dolar.xlsx")) %>%
+  mutate(mes = format(as.Date(mes), format = "%Y-%m"))
+
+
+#Elimina las longitudes y latitudes que esten en blanco
+archivo <- archivo %>%
+# Realizar una unión izquierda con el data frame cot_dolar usando la columna mes
+  left_join(cot_dolar, "mes") %>% 
+  mutate(
+  LONGITUDE= str_replace_all(ITE_ADD_LONGITUDE, ",", "."),
+  LATITUDE= str_replace_all(ITE_ADD_LATITUDE, ",", "."),
+  tc_prom = round(as.numeric(tc_prom),2)
+  ) 
+
+
+# filtra y revisa si hay algun Na en latitude 
+archivo <-filter(archivo, !is.na(LATITUDE)|LATITUDE == "")
+
+#agregar comentario
+archivo <- st_as_sf(archivo, coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
+
+#verifica si DOl es true o false y crea respectivas columnas y las pasa a peso o dolares 
+archivo <- mutate(archivo,
+                       dummy_dolar = ifelse(SIT_CURRENCY_ID == "DOL", T, F)) %>% 
+  mutate(precio_pesos = round(ifelse(dummy_dolar == F, as.numeric(ITE_CURRENT_PRICE),
+                                     as.numeric(ITE_CURRENT_PRICE) * tc_prom),2),
+         precio_dolares = round(ifelse(dummy_dolar == T, as.numeric(ITE_CURRENT_PRICE)
+                                       , as.numeric(ITE_CURRENT_PRICE) / tc_prom),2))
+
+# calcula pesosm2tot, dolaresm2tot, pesosm2_cub, dolaresm2_cub esto pordria ser funciones.
+
+archivo <- archivo %>%  mutate(pesosm2tot = round(precio_pesos/ .$TOTAL_AREA,2),
+                               dolaresm2tot = round(precio_dolares / .$TOTAL_AREA,2),
+                               pesosm2_cub = round(precio_pesos/ .$COVERED_AREA,2),
+                               dolaresm2_cub = round(precio_dolares / .$COVERED_AREA,2)
+                               ) %>% 
+                                select(-MESLISTING,-ITE_ADD_STATE_NAME, -ITE_ADD_CITY_NAME,
+                                      -ITE_ADD_LONGITUDE,-ITE_ADD_LATITUDE, -ITE_ADD_NEIGHBORHOOD_NAME_1,
+                                      -ITE_ADD_NEIGHBORHOOD_NAME, -SIT_SITE_ID)
+library(dplyr)
+
+# Función para calcular 'pesosm2tot'
+pesosm2tot_funct <- function(precio_pesos, TOTAL_AREA) {
+  round(precio_pesos / TOTAL_AREA, 2)
+}
+
+# Función para calcular 'dolaresm2tot'
+dolaresm2tot_funct <- function(precio_dolares, TOTAL_AREA) {
+  round(precio_dolares / TOTAL_AREA, 2)
+}
+
+# Función para calcular 'pesosm2_cub'
+pesosm2_cub_funct <- function(precio_pesos, COVERED_AREA) {
+  round(precio_pesos / COVERED_AREA, 2)
+}
+
+# Función para calcular 'dolaresm2_cub'
+dolaresm2_cub_funct <- function(precio_dolares, COVERED_AREA) {
+  round(precio_dolares / COVERED_AREA, 2)
+}
+archivo <- archivo %>%
+  mutate(
+    pesosm2tot = pesosm2tot_funct(precio_pesos, TOTAL_AREA),
+    dolaresm2tot = dolaresm2tot_funct(precio_dolares, TOTAL_AREA),
+    pesosm2_cub = pesosm2_cub_funct(precio_pesos, COVERED_AREA),
+    dolaresm2_cub = dolaresm2_cub_funct(precio_dolares, COVERED_AREA)
+  ) %>% 
+    select(-MESLISTING,-ITE_ADD_STATE_NAME, -ITE_ADD_CITY_NAME,
+           -ITE_ADD_LONGITUDE,-ITE_ADD_LATITUDE, -ITE_ADD_NEIGHBORHOOD_NAME_1,
+           -ITE_ADD_NEIGHBORHOOD_NAME, -SIT_SITE_ID)
+
+#############################################################################################
+
+ZDP_sivys <- sf::read_sf("insumo/desarrollo_prioritario.geojson")
+archivo <- sf::st_join(archivo, ZDP_sivys, join = sf::st_within)
+
+archivo <- sf::st_join(archivo, zonas_sivys, join = sf::st_within)
+
+
+
+archivo_limp <- st_filter(archivo, zonas_sivys, .predicate = st_within)
+
+paste(nrow(archivo)-nrow(archivo_limp),
+      "casos han sido limpiados por no estar contenidos en los poligonos de localidades."," Se eliminó el",
+      round((nrow(archivo)-nrow(archivo_limp))/nrow(archivo)*100,2),"porcien de los casos")
+
+
+n_limp <- nrow(archivo)-nrow(archivo_limp)
+
+
+
+
+archivo_limp <- archivo_limp %>% filter(TOTAL_AREA>=COVERED_AREA)
+
+# funcion para verificar todos digitos iguales
+verificar_digitos_iguales <- function(digitos) {
+  digitos_str <- as.character(abs(digitos))  # Convert number to string
+  digitos <- strsplit(digitos_str, "")[[1]]  # Split number into individual digits
+  iguales <- length(unique(digitos)) == 1  # Check if all digits are the same
+  return(iguales)
+}
+
+
+# filtro digitos iguales en dolares.
+archivo_limp$digitos_iguales <- sapply(archivo_limp$precio_dolares, verificar_digitos_iguales)
+
+archivo_limp <- filter(archivo_limp,archivo_limp$digitos_iguales== FALSE)
+
+
+
+
+# filtro digitos iguales en pesos
+
+archivo_limp$digitos_iguales_pesos <- sapply(archivo_limp$precio_pesos, verificar_digitos_iguales)
+
+archivo_limp <- filter(archivo_limp,archivo_limp$digitos_iguales_pesos== FALSE)
+
+paste(nrow(archivo)-(nrow(archivo_limp)+n_limp),
+      "casos han sido limpiados por tener un precio con todos los dígitos iguales (ej: 11111111)."," Se eliminó el",
+      round((nrow(archivo)-(nrow(archivo_limp)+n_limp))/(nrow(archivo)+n_limp)*100,2),"porcien de los casos")
+
+
+n_limp <- nrow(archivo)-(nrow(archivo_limp))
+
+# filtrar casos en donde los metros totales sean menores a los cubiertos
+
+archivo_limp <- filter(archivo_limp, archivo_limp$TOTAL_AREA >= archivo_limp$COVERED_AREA)
+# filtro publicaciones menores a 25 metros cuadrados totales
+
+archivo_limp <- filter(archivo_limp, archivo_limp$TOTAL_AREA >=25)
+
+paste(nrow(archivo)-(nrow(archivo_limp)+n_limp),
+      "casos han sido limpiados por tener metros cuadrados totales menores a 25"," Se eliminó el",
+      round((nrow(archivo)-(nrow(archivo_limp)+n_limp))/(nrow(archivo)+n_limp)*100,2),"porcien de los casos")
+
+
+archivo_limp <- filter(archivo_limp, archivo_limp$COVERED_AREA >=25)
+
+paste(nrow(archivo)-(nrow(archivo_limp)+n_limp),
+      "casos han sido limpiados por tener metros cuadrados cubiertos menores a 25"," Se eliminó el",
+      round((nrow(archivo)-(nrow(archivo_limp)+n_limp))/(nrow(archivo)+n_limp)*100,2),"porcien de los casos")
+
+
+archivo_limp$digitos_iguales_m2tot <- sapply(archivo_limp$TOTAL_AREA, verificar_digitos_iguales)
+
+archivo_limp$borrar <- ifelse(archivo_limp$digitos_iguales_m2tot== TRUE  & archivo_limp$TOTAL_AREA > 100,TRUE,FALSE)
+archivo_limp <- filter(archivo_limp, archivo_limp$borrar== FALSE)
+
+n_limp <- nrow(archivo)-(nrow(archivo_limp))
+
+paste(n_limp,
+      "casos han sido limpiados por todos los motivos anteriores"," Se eliminó el",
+      round(n_limp/(nrow(archivo))*100,2),"porcien de los casos")
+
+
+
+
+archivo_limp <- archivo_limp %>% filter(PROPERTY_TYPE == "Casa"| PROPERTY_TYPE == "Departamento" | PROPERTY_TYPE == "PH")
+
+archivo_limp_alq <- filter(archivo_limp, archivo_limp$OPERATION=="Alquiler")
+
+archivo_limp_vent <- archivo_limp %>% filter(OPERATION=="Venta")
+
+
+out <- boxplot.stats(archivo_limp_vent$dolaresm2tot)$out
+
+out_ind <- which(archivo_limp_vent$dolaresm2tot %in% c(out))
+
+outliers_vent <- archivo_limp_vent[out_ind, ]
+
+archivo_limp_vent_sin_out <- archivo_limp_vent[-out_ind, ]
+
+archivo_limp_vent_sin_outs <- filter(archivo_limp_vent_sin_out, dolaresm2tot >= 100)
+
+write_csv(archivo_limp_vent_sin_outs, paste("Resultados/ML",anio,mes,"venta.csv",
+                                            sep = "_"))
+
+
+out <- boxplot.stats(archivo_limp_alq$pesosm2tot)$out
+out_ind <- which(archivo_limp_alq$pesosm2tot %in% c(out))
+outliers_alq <- archivo_limp_alq[out_ind, ]
+
+archivo_limp_alq_sin_out <- archivo_limp_alq[-out_ind, ]
+
+write_csv(archivo_limp_alq_sin_out, paste("Resultados/ML",anio,mes,"alq.csv", sep = "_"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+file_list <- list.files(path = paste(wd,"Resultados", sep= "/"),
+                        pattern= "*alq.csv")
+
+
+setwd(paste(wd,"Resultados", sep= "/"))
+combinado_alq <- read_csv("combinado_alqui.csv", col_types = cols(.default = "c"))
+alquiler_sumar <- read_csv(paste("ML_",anio,"_",mes,"_alq.csv", sep = ""),col_types = cols(.default = "c"))
+
+combinado_alq <- bind_rows(combinado_alq, alquiler_sumar)
+write_csv(combinado_alq, "combinado_alqui.csv")
+
+
+
+
+combinado_vent <- read_csv("combinado_venta.csv", col_types = cols(.default = "c"))
+venta_sumar <- read_csv(paste("ML_",anio,"_",mes,"_venta.csv", sep = ""),col_types = cols(.default = "c"))
+
+combinado_vent <- bind_rows(combinado_vent, venta_sumar)
+write_csv(combinado_vent, "combinado_venta.csv")
+
+
+
+
+frequency_df <- as.data.frame(table(combinado_alq$`ID Final`))
+
+frequency_df <- filter(frequency_df, Freq > 1)
+
+combinado_alq <- filter(combinado_alq, `ID Final` %in% frequency_df$Var1)
+
+combinado_alq <- arrange(combinado_alq, `ID Final`, mes)
+
+write.csv(combinado_alq, "evolucion_alq.csv")
+
+
+
+
+frequency_df <- as.data.frame(table(combinado_vent$`ID Final`))
+
+frequency_df <- filter(frequency_df, Freq > 1)
+
+combinado_vent <- filter(combinado_vent, `ID Final` %in% frequency_df$Var1)
+
+combinado_vent <- arrange(combinado_vent, `ID Final`, mes)
+
+write.csv(combinado_vent, "evolucion_venta.csv")
